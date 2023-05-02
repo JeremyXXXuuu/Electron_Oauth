@@ -1,7 +1,7 @@
 import * as Http from "http";
 import * as Url from "url";
-import { BasicQueryStringUtils, QueryStringUtils } from "./query_string_utils";
 import { AuthorizationRequest } from "./authorization_request";
+import { BasicQueryStringUtils, QueryStringUtils } from "./query_string_utils";
 import { AuthorizationServiceConfiguration } from "./authorization_configuration";
 import { Crypto, NodeCrypto } from "./crypto_utils";
 import { log } from "../logger";
@@ -18,6 +18,14 @@ export const BUILT_IN_PARAMETERS = [
   "state",
   "scope",
 ];
+/**
+ * Represents a structural type holding both authorization request and response.
+ */
+export interface AuthorizationRequestResponse {
+  request: AuthorizationRequest;
+  response: AuthorizationResponse|null;
+  error: AuthorizationError|null;
+}
 
 class ServerEventsEmitter extends EventEmitter {
   static ON_UNABLE_TO_START = "unable_to_start";
@@ -25,11 +33,37 @@ class ServerEventsEmitter extends EventEmitter {
 }
 
 export class AuthorizationRequestHandler {
+  authorizationPromise: Promise<AuthorizationRequestResponse|null>|null = null;
+  emitter: ServerEventsEmitter|null = null;
+  server: Http.Server|null = null;
   constructor(
     public httpServerPort: number,
+    emitter: ServerEventsEmitter,
     public utils = new BasicQueryStringUtils(),
     protected crypto: Crypto = new NodeCrypto()
-  ) {}
+  ) {
+    this.emitter = emitter;
+    this.authorizationPromise = new Promise<AuthorizationRequestResponse>((resolve, reject) => {
+      emitter.once(ServerEventsEmitter.ON_UNABLE_TO_START, () => {
+        reject(`Unable to create HTTP server at port ${this.httpServerPort}`);
+      });
+      emitter.once(ServerEventsEmitter.ON_AUTHORIZATION_RESPONSE, (result: any) => {
+        // Set timeout for the server connections to 1 ms as we wish to close and end the server
+        // as soon as possible. This prevents a user failing to close the redirect window from
+        // causing a hanging process due to the server.
+        this.server.setTimeout(1);
+        this.server.close();
+        // resolve pending promise
+        resolve(result as AuthorizationRequestResponse);
+        // complete authorization flow
+        this.completeAuthorizationRequestIfPossible();
+      });
+    });
+  }
+  completeAuthorizationRequestIfPossible(){
+
+  }
+
 
   protected buildRequestUrl(
     configuration: AuthorizationServiceConfiguration,
@@ -66,7 +100,6 @@ export class AuthorizationRequestHandler {
   async performAuthorizationRequest(
     configuration: AuthorizationServiceConfiguration,
     request: AuthorizationRequest,
-    emitter: EventEmitter
   ): Promise<void> {
     const requestHandler = (
       httpRequest: Http.IncomingMessage,
@@ -107,12 +140,15 @@ export class AuthorizationRequestHandler {
       } else {
       authorizationResponse = new AuthorizationResponse({ code: code, state: requestState });
       }
-      const response = {
+      const res: AuthorizationRequestResponse = {
         request,
         response: authorizationResponse,
         error: authorizationError
       };
-      emitter.emit(ServerEventsEmitter.ON_AUTHORIZATION_RESPONSE, response);
+      this.emitter.emit(ServerEventsEmitter.ON_AUTHORIZATION_RESPONSE, res);
+      httpResponse.setHeader("Content-Type", "text/html");
+      httpResponse.statusCode = 200;
+      httpResponse.end("<html><body><h1>You can now close this window</h1></body></html>");
     };
 
     let server: Http.Server;
@@ -128,7 +164,7 @@ export class AuthorizationRequestHandler {
       })
       .catch((error) => {
         log("Something bad happened ", error);
-        emitter.emit(ServerEventsEmitter.ON_UNABLE_TO_START);
+        this.emitter.emit(ServerEventsEmitter.ON_UNABLE_TO_START);
       });
   }
 }
